@@ -4,6 +4,10 @@ A small self-hosted web app for moving files between your machines. It runs in D
 
 Built for reaching home over Tailscale, including from a phone.
 
+https://github.com/user-attachments/assets/e3d3baad-05de-4881-8d77-faa0614a532b
+
+The video is a screen recording of a demo copy. Photos by @lovepubliclands.
+
 ## What it does
 
 - Browse, rename, make folders, upload from the device you're on, download files or whole folders as a zip
