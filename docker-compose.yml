@@ -1,0 +1,30 @@
+# Ferry: browse and move files between your machines.
+# Settings live in .env next to this file (copy .env.example).
+name: ferry
+
+services:
+  ferry:
+    build: .
+    image: ferry:local
+    container_name: ferry
+    # run as your own user so files keep your ownership
+    user: "${PUID:-1000}:${PGID:-100}"
+    group_add:
+      - "${EXTRA_GID:-100}"   # Synology: 101 (administrators) lets it write #recycle
+    # the default bridge, so it doesn't need a Docker address pool of its own
+    network_mode: bridge
+    ports:
+      # 127.0.0.1 keeps it off your home network. Synology's Tailscale still
+      # reaches it; elsewhere put tailscale serve or a reverse proxy in front
+      - "${FERRY_BIND:-127.0.0.1}:8420:8420"
+    volumes:
+      - ${FERRY_FILES:-/volume1}:/nas
+      - ${FERRY_DATA_DIR:-./data}:/data
+      # optional: lets Ferry reach other tailnet machines when Tailscale runs in
+      # userspace mode (Synology's package does). Remove both lines if not needed.
+      - ${TAILSCALE_BIN:-/volume1/@appstore/Tailscale/bin/tailscale}:/usr/local/bin/tailscale:ro
+      - ${TAILSCALE_SOCKET:-/volume1/@appdata/Tailscale/tailscaled.sock}:/var/run/tailscale/tailscaled.sock
+    environment:
+      FERRY_PASSWORD: ${FERRY_PASSWORD:?set FERRY_PASSWORD in .env}
+      FERRY_LOCAL_NAME: ${FERRY_LOCAL_NAME:-NAS}
+    restart: unless-stopped
