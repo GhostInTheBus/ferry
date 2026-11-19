@@ -23,7 +23,7 @@ from typing import Awaitable, Callable, Optional
 
 from . import config, db
 from .backends import manager
-from .backends.base import (PART_SUFFIX, Backend, BackendError, Disconnected,
+from .backends.base import (PART_SUFFIX, RESUME_ALIGN, Backend, BackendError, Disconnected,
                             Entry, NotFound, join, norm, part_name)
 
 LIST_PARALLEL = 8          # folders listed at the same time
@@ -124,6 +124,7 @@ class Job:
     started: float = 0.0
     finished: float = 0.0
     cancelled: bool = False
+    parked: dict = field(default_factory=dict)  # bytes waiting in kept part files, shown as done
 
     SAVED = ("id", "kind", "title", "src_conn", "src_paths", "dst_conn", "dst_dir", "conflict",
              "archive", "targets", "status", "error", "errors", "bytes_total", "bytes_done",
@@ -138,6 +139,8 @@ class Job:
 
     def to_dict(self) -> dict:
         d = {k: getattr(self, k) for k in self.SAVED if k not in ("archive", "errors")}
+        if self.status not in FINISHED:
+            d["bytes_done"] += sum(self.parked.values())
         d.update(phase=self.phase, current=self.current, speed=self.speed, counting=self.counting,
                  errors=self.errors[-50:], error_count=len(self.errors))
         return d
@@ -580,6 +583,7 @@ class Engine:
         w = await db_.open_write(target, mtime=it.mtime or None, mode=it.mode or None,
                                  part=part, offset=offset, replace=replace)
         written = offset
+        job.parked.pop(it.src, None)
         job.bytes_done += offset
         agen = sb.read(it.src, offset)
         try:
@@ -588,6 +592,8 @@ class Engine:
                 await w.write(chunk)
                 written += len(chunk)
                 job.bytes_done += len(chunk)
+                if job.status == "waiting":  # bytes are flowing again
+                    self._status(job, "running")
                 sb.last_used = db_.last_used = time.time()
                 self._tick(job)
             if written != it.size:
@@ -597,6 +603,8 @@ class Engine:
             job.bytes_done -= written
             err = e if isinstance(e, (JobCancelled, asyncio.CancelledError)) else classify(e)
             keep = isinstance(err, Disconnected) and it.size >= RESUME_MIN
+            if keep:
+                job.parked[it.src] = written - written % RESUME_ALIGN
             await w.abort(keep=keep)
             if err is e:
                 raise

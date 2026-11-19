@@ -224,7 +224,7 @@ svg.i { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-widt
 .list.grid .row[aria-selected="true"] { background: var(--shoal); }
 .list.grid .row[aria-selected="true"] .ico { box-shadow: 0 0 0 2px var(--magenta); }
 
-.empty { padding: 48px 24px; text-align: center; color: var(--sounding); }
+.empty { padding: 48px 24px; text-align: center; color: var(--sounding); grid-column: 1 / -1; }
 .empty strong { display: block; color: var(--ink); font-weight: 500; margin-bottom: 4px; }
 .empty .btn { margin-top: 14px; }
 .pane-foot {

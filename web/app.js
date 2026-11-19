@@ -1026,7 +1026,7 @@ function renderTransfers() {
       <div class="sub"><span class="st ${j.status}">${jobStatusText(j)}</span>
         ${j.files_total ? `<span>${j.files_done + j.files_skipped} of ${plural(j.files_total, "file")}${j.counting ? ", still counting" : ""}</span>` : ""}
         ${j.bytes_total ? `<span>${fmtSize(j.bytes_done)} of ${fmtSize(j.bytes_total)}</span>` : ""}
-        ${active && j.speed > 0 ? `<span>${fmtSize(j.speed)}/s</span><span>${eta}</span>` : ""}
+        ${active && j.status !== "waiting" && j.speed > 0 ? `<span>${fmtSize(j.speed)}/s</span><span>${eta}</span>` : ""}
         ${j.files_skipped ? `<span>${j.files_skipped} already there</span>` : ""}
         ${j.error ? `<span class="st error">${esc(j.error)}</span>` : ""}</div>
       ${active && j.current ? `<div class="cur">${esc(j.current)}</div>` : ""}
