@@ -12,6 +12,8 @@ The video is a screen recording of a demo copy. Photos by @lovepubliclands.
 
 - Browse, rename, make folders, upload from the device you're on, download files or whole folders as a zip
 - Copy and move between any two connections, with a queue you can pause, resume, cancel and retry
+- Dragging between the two panes asks whether to copy or move (C or M on the keyboard)
+- Merge folders: pick two or more folders on one machine and the one to keep. Everything moves into it, a file that's already there with the same content goes to the trash, and a different file with the same name is kept with a number added
 - Copies start right away while folders are still being counted
 - Rerunning a transfer only fills in what's missing: a file already there with the same size and date is skipped
 - Files are written under a hidden name and renamed when complete, so a dropped connection never leaves half a file behind
@@ -91,6 +93,7 @@ FERRY_DATA=/tmp/ferrytest/data FERRY_LOCAL_ROOT=/tmp/ferrytest/nas FERRY_PASSWOR
 python3 tests/servers.py /tmp/ferrytest &
 python3 tests/e2e.py /tmp/ferrytest
 python3 tests/e2e_v02.py /tmp/ferrytest
+python3 tests/e2e_merge.py /tmp/ferrytest
 ```
 
 ## Known gaps

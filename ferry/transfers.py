@@ -6,13 +6,17 @@ How a copy runs:
   - every file is written under a hidden part name and renamed when complete
   - a file already at the destination with the same size and date is skipped,
     so running a job again only fills in what's missing
-  - a move deletes each source file right after its copy is confirmed
+  - a move deletes each source file right after its copy is confirmed; on one
+    connection it renames each file instead, which is instant
+  - a merge is a move into an existing folder: duplicates go to the trash,
+    different files with the same name are kept side by side
   - when a connection drops the job waits and retries instead of failing
   - jobs are saved, so a restart picks unfinished ones back up
 """
 from __future__ import annotations
 
 import asyncio
+import filecmp
 import posixpath
 import shutil
 import time
@@ -21,7 +25,7 @@ from collections import OrderedDict, defaultdict
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Optional
 
-from . import config, db
+from . import config, db, trash
 from .backends import manager
 from .backends.base import (PART_SUFFIX, RESUME_ALIGN, Backend, BackendError, Disconnected,
                             Entry, NotFound, join, norm, part_name)
@@ -66,6 +70,7 @@ class Item:
     size: int = 0
     mtime: float = 0.0
     mode: int = 0
+    renamed: bool = False  # moved by a rename on one connection
 
 
 class Side:
@@ -103,7 +108,7 @@ class Job:
     src_paths: list
     dst_conn: str
     dst_dir: str
-    conflict: str = "rename"  # rename (keep both), overwrite, skip, resume
+    conflict: str = "rename"  # rename (keep both), overwrite, skip, resume, merge
     title: str = ""
     archive: Optional[dict] = None
     targets: dict = field(default_factory=dict)  # top level source -> destination
@@ -212,7 +217,7 @@ class Engine:
                 self.jobs[job.id] = job
                 continue
             paused = job.status == "paused"
-            job.conflict = "resume"
+            job.conflict = "merge" if job.conflict == "merge" else "resume"
             job.status = "queued"
             job.bytes_done = job.files_done = job.files_skipped = 0
             job.bytes_total = job.files_total = 0
@@ -269,7 +274,8 @@ class Engine:
         """Run the same job again. Finished files are skipped, the rest fill in."""
         j = self.jobs[jid]
         return self.submit(Job(kind=j.kind, src_conn=j.src_conn, src_paths=j.src_paths,
-                               dst_conn=j.dst_conn, dst_dir=j.dst_dir, conflict="resume",
+                               dst_conn=j.dst_conn, dst_dir=j.dst_dir,
+                               conflict="merge" if j.conflict == "merge" else "resume",
                                title=j.title, archive=j.archive, targets=dict(j.targets)))
 
     async def _gate(self, job: Job) -> None:
@@ -561,20 +567,62 @@ class Engine:
             raise
         except Exception as e:
             raise classify(e) from e
-        target, replace = it.dst, False
-        existing = have.get(name)
-        if existing is not None:
-            if same_file(existing, it.size, it.mtime):
-                await self._done(job, run, it, sb, copied=False)
-                return
-            if existing.is_dir or job.conflict in ("rename", "resume"):
-                target = await unique_name(db_, parent, name, have)
+        # Names are picked under a lock and held in the folder listing while the file is on
+        # its way, so two files going to one folder (a merge) never pick the same name.
+        lock = run.locks["name:" + parent]
+        target, replace, mine = it.dst, False, None
+        async with lock:
+            existing = have.get(name)
+            if existing is None:
+                mine = have[name] = Entry(name, it.dst, False, it.size, it.mtime, extra={"pending": True})
+        if mine is None:
+            pending = existing.extra.get("pending", False)
+            if not pending:
+                dup = same_file(existing, it.size, it.mtime)
+                if job.conflict == "merge" and not existing.is_dir and existing.size == it.size:
+                    same = await self._same_content(sb, it.src, db_, existing.path or join(parent, name))
+                    dup = dup if same is None else same  # bytes beat dates when they can be read
+                if dup:
+                    await self._done(job, run, it, sb, copied=False)
+                    return
+            if existing.is_dir or pending or job.conflict in ("rename", "resume", "merge"):
+                async with lock:
+                    target = await unique_name(db_, parent, name, have)
+                    tn = posixpath.basename(target)
+                    mine = have[tn] = Entry(tn, target, False, it.size, it.mtime, extra={"pending": True})
             elif job.conflict == "skip":
                 job.files_skipped += 1
                 job.bytes_done += it.size
                 return
             else:
                 replace = True
+        tn = posixpath.basename(target)
+        try:
+            await self._put(job, run, it, sb, db_, target, replace, classify)
+        except BaseException:
+            if mine is not None and have.get(tn) is mine:
+                del have[tn]  # free the name again, nothing landed there
+            raise
+        have[tn] = Entry(tn, target, False, it.size, it.mtime)
+        await self._done(job, run, it, sb, copied=True)
+
+    async def _put(self, job: Job, run: Run, it: Item, sb: Backend, db_: Backend, target: str,
+                   replace: bool, classify) -> None:
+        """Get one file to target: a rename on one connection, otherwise a copy through a part file."""
+        parent = posixpath.dirname(target)
+        if job.kind == "move" and run.src.cid == run.dst.cid and not replace:
+            job.current = it.src
+            try:  # one connection: rename the file instead of copying its bytes
+                await sb.rename(it.src, target)
+            except Exception as e:
+                if isinstance(classify(e), Disconnected):
+                    raise classify(e) from e
+            else:
+                job.files_done += 1
+                job.bytes_done += it.size
+                self.bump(force=False)
+                it.renamed = True
+                return
         part = part_name(posixpath.basename(target), it.size, it.mtime)
         offset = 0
         if it.size >= RESUME_MIN and db_.resumable:
@@ -611,21 +659,40 @@ class Engine:
             raise err from e
         finally:
             await agen.aclose()
-        have[posixpath.basename(target)] = Entry(posixpath.basename(target), target, False, it.size, it.mtime)
-        await self._done(job, run, it, sb, copied=True)
 
     async def _done(self, job: Job, run: Run, it: Item, sb: Backend, copied: bool) -> None:
+        if it.renamed:
+            return  # moved by rename: counted already, nothing left behind
         if copied:
             job.files_done += 1
         else:
             job.files_skipped += 1
             job.bytes_done += it.size
         if job.kind == "move" and not run.src.cid.startswith("_"):
-            try:  # the copy is confirmed, now the original can go
-                await sb.remove(it.src)
+            try:  # the copy is confirmed (or was already there), now the original can go
+                if job.conflict == "merge" and not copied:
+                    await trash.discard(sb, self._trash_of(run.src.cid), it.src)
+                else:
+                    await sb.remove(it.src)
             except Exception as e:
-                job.errors.append(f"Copied but couldn't remove {it.src}: {sb.translate(e)}")
+                job.errors.append(f"Couldn't remove {it.src}: {sb.translate(e)}")
         self.bump(force=False)
+
+    @staticmethod
+    def _trash_of(cid: str) -> str:
+        conn = db.get_connection(cid, secrets_too=False)
+        return trash.setting(conn) if conn else ""
+
+    @staticmethod
+    async def _same_content(sb: Backend, a: str, db_: Backend, b: str) -> Optional[bool]:
+        """Byte for byte check where both files are on this machine's disks, else None."""
+        try:
+            la, lb = await sb.local_path(a), await db_.local_path(b)
+            if not la or not lb:
+                return None
+            return await asyncio.to_thread(filecmp.cmp, la, lb, False)
+        except Exception:
+            return None
 
     # archives ---------------------------------------------------------------
     async def _extract(self, job: Job) -> None:

@@ -625,6 +625,10 @@ async function transfer(kind, from, dstDir, paths) {
   paths = paths || selectionPaths(from);
   if (!paths.length) return;
   const target = dstDir || dst.path;
+  if (kind === "ask") {
+    kind = await chooseKind(selected(from).length || paths.length, `${connName(dst.conn)} ${target}`);
+    if (!kind) return;
+  }
   if (src.conn === dst.conn && paths.every((x) => dirname(x) === target) && kind === "move") {
     return toast("Those files are already in that folder.");
   }
@@ -682,6 +686,62 @@ function trashInfo(p, paths) {
   }
   if (t === "@synology") return { permanent: false, where: `They go to the #recycle folder of that shared folder on ${c.name}.` };
   return { permanent: false, where: `They go to ${t} on ${c.name}.` };
+}
+
+// Copy or move? Buttons, or C and M on the keyboard.
+function chooseKind(n, where) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v) => { if (done) return; done = true; document.removeEventListener("keydown", onKey, true); closeAll(); resolve(v); };
+    const el = sheet({
+      title: `Copy or move ${plural(n, "item")}?`,
+      body: `<p class="muted">To ${esc(where)}</p>`,
+      foot: `<button class="btn ghost" data-k="">Cancel</button>
+        <button class="btn" data-k="move">${icon("move")}Move <kbd>M</kbd></button>
+        <button class="btn primary" data-k="copy">${icon("copy")}Copy <kbd>C</kbd></button>`,
+      onClose: () => finish(null),
+    });
+    const onKey = (e) => {
+      const k = e.key.toLowerCase();
+      if (k === "c" || k === "m") { e.preventDefault(); e.stopPropagation(); finish(k === "c" ? "copy" : "move"); }
+      else if (k === "escape") { e.preventDefault(); e.stopPropagation(); finish(null); }
+    };
+    document.addEventListener("keydown", onKey, true);
+    $$("[data-k]", el).forEach((b) => (b.onclick = () => finish(b.dataset.k || null)));
+    setTimeout(() => $('[data-k="copy"]', el)?.focus(), 30);
+  });
+}
+
+// Merge folders on one connection: pick the one to keep, the others move into it.
+async function mergeFlow(i) {
+  const p = S.panes[i];
+  const dirs = selected(i).filter((e) => e.is_dir);
+  if (dirs.length < 2) return toast("Select two or more folders to merge.");
+  const el = sheet({
+    title: `Merge ${dirs.length} folders`,
+    body: `<form id="mf"><div class="field"><span>Keep everything in</span>
+        ${dirs.map((d, k) => `<label class="radio"><input type="radio" name="into" value="${esc(d.path)}"${k === 0 ? " checked" : ""}> ${icon("folder")}<span>${esc(d.name)}</span></label>`).join("")}</div></form>
+      <ul class="small muted merge-notes">
+        <li>Everything in the other folders moves into it, subfolders too.</li>
+        <li>A file that's already there with the same content goes to the trash.</li>
+        <li>A different file with the same name is kept, with a number added.</li>
+        <li>The other folders are removed once they're empty.</li>
+      </ul>`,
+    foot: `<button class="btn ghost" data-close2>Cancel</button><button class="btn primary" form="mf">Merge</button>`,
+  });
+  $("[data-close2]", el).onclick = closeAll;
+  $("#mf", el).onsubmit = async (e) => {
+    e.preventDefault();
+    const into = new FormData(e.target).get("into");
+    closeAll();
+    try {
+      await POST("/api/merge", { conn: p.conn, paths: dirs.map((d) => d.path), into });
+      toast(`Merging ${plural(dirs.length, "folder")}`, { action: { label: "Show", fn: openTransfers } });
+      p.sel.clear();
+      S.selectMode = false;
+      updateRowSelection(i);
+    } catch (err) { toast(err.message, { err: true }); }
+  };
 }
 
 async function deleteFlow(i) {
@@ -831,13 +891,14 @@ function renderActionbar() {
   const o = S.panes[other(i)];
   if (!items.length) {
     bar.className = "actionbar idle";
-    bar.innerHTML = `<span class="info">${MOBILE.matches ? "" : "Select files, then copy them across. Drag between docks works too. Hold Shift to move instead."}</span>`;
+    bar.innerHTML = `<span class="info">${MOBILE.matches ? "" : "Select files, then copy or move them across. Dragging between docks asks which."}</span>`;
     return;
   }
   bar.className = "actionbar";
   const size = items.reduce((a, e) => a + (e.is_dir ? 0 : e.size), 0);
   const dest = o.conn ? connName(o.conn) : "the other dock";
   const one = items.length === 1 ? items[0] : null;
+  const canMerge = items.length > 1 && items.every((e) => e.is_dir);
   bar.innerHTML = `
     <span class="info"><b>${items.length} selected</b>${size ? ` <span>${fmtSize(size)}</span>` : ""}</span>
     <div class="acts">
@@ -847,6 +908,7 @@ function renderActionbar() {
       <button class="btn ghost" data-act="download" title="Download to this device">${icon("download")}<span class="lbl-long">Download</span></button>
       ${one ? `<button class="btn ghost" data-act="rename" title="Rename">${icon("pencil")}<span class="lbl-long">Rename</span></button>` : ""}
       ${one && one.kind === "archive" ? `<button class="btn ghost" data-act="extract" title="Open archive">${icon("extract")}<span class="lbl-long">Extract</span></button>` : ""}
+      ${canMerge ? `<button class="btn ghost" data-act="merge" title="Merge these folders into one">${icon("merge")}<span class="lbl-long">Merge</span></button>` : ""}
       <button class="btn ghost danger" data-act="delete" title="Delete">${icon("trash")}</button>`}
       ${MOBILE.matches ? `<button class="btn" data-act="more" aria-label="More actions">${icon("more")}</button>` : ""}
     </div>`;
@@ -954,6 +1016,7 @@ function actionsMenuHtml(i) {
     ${one ? `<button data-m="rename">${icon("pencil")}Rename</button>` : ""}
     ${one && one.kind === "archive" ? `<button data-m="extract">${icon("extract")}Extract</button>` : ""}
     ${one && !one.is_dir ? `<button data-m="copylink">${icon("link")}Copy Ferry link</button>` : ""}
+    ${items.length > 1 && items.every((e) => e.is_dir) ? `<button data-m="merge">${icon("merge")}Merge folders</button>` : ""}
     <hr><button data-m="delete" class="danger">${icon("trash")}Delete</button>`;
 }
 
@@ -967,6 +1030,7 @@ function runMenu(i, m) {
   if (m === "rename") renameFlow(i);
   if (m === "extract" && items[0]) openArchive(i, items[0]);
   if (m === "delete") deleteFlow(i);
+  if (m === "merge") mergeFlow(i);
   if (m === "copylink" && items[0]) {
     const url = location.origin + `/api/raw${qs({ conn: p.conn, path: items[0].path })}`;
     navigator.clipboard?.writeText(url).then(() => toast("Link copied. It only works where you're signed in to Ferry."), () => toast(url));
@@ -1027,7 +1091,7 @@ function renderTransfers() {
         ${j.files_total ? `<span>${j.files_done + j.files_skipped} of ${plural(j.files_total, "file")}${j.counting ? ", still counting" : ""}</span>` : ""}
         ${j.bytes_total ? `<span>${fmtSize(j.bytes_done)} of ${fmtSize(j.bytes_total)}</span>` : ""}
         ${active && j.status !== "waiting" && j.speed > 0 ? `<span>${fmtSize(j.speed)}/s</span><span>${eta}</span>` : ""}
-        ${j.files_skipped ? `<span>${j.files_skipped} already there</span>` : ""}
+        ${j.files_skipped ? `<span>${j.conflict === "merge" ? `${plural(j.files_skipped, "duplicate")} to the trash` : `${j.files_skipped} already there`}</span>` : ""}
         ${j.error ? `<span class="st error">${esc(j.error)}</span>` : ""}</div>
       ${active && j.current ? `<div class="cur">${esc(j.current)}</div>` : ""}
       ${j.error_count ? `<details><summary>${plural(j.error_count, "problem")}</summary><ul>${j.errors.map((x) => `<li>${esc(x)}</li>`).join("")}</ul></details>` : ""}
@@ -1084,6 +1148,11 @@ function onJobFinished(j) {
   if (j.kind === "move") j.src_paths.forEach((p) => refreshWhere(j.src_conn, dirname(p)));
   const dest = connName(j.dst_conn);
   if (j.status === "done") {
+    if (j.conflict === "merge") {
+      const dups = j.files_skipped ? `, ${plural(j.files_skipped, "duplicate")} to the trash` : "";
+      const tail = j.error_count ? `, ${plural(j.error_count, "problem")}` : "";
+      return toast(`Merged: ${plural(j.files_done, "file")} moved${dups}${tail}`, j.error_count ? { err: true, action: { label: "Show", fn: openTransfers } } : {});
+    }
     const verb = { copy: "Copied", move: "Moved", extract: "Extracted" }[j.kind] || "Done";
     const n = j.files_done;
     const there = j.files_skipped ? `, ${j.files_skipped} already there` : "";
@@ -1547,7 +1616,8 @@ function bindFrame() {
         case "upload": S.uploadTarget = ip; return $("#upload-input").click();
         case "view": S.panes[ip].view = S.panes[ip].view === "grid" ? "list" : "grid"; savePanes(); renderTools(ip); return renderList(ip);
         case "sort": return sortMenu(ip, actEl);
-        case "cross": return transfer("copy", +actEl.dataset.from);
+        case "cross": return transfer("ask", +actEl.dataset.from);
+        case "merge": return mergeFlow(S.active);
         case "copy-across": return transfer("copy", S.active);
         case "move-across": return transfer("move", S.active);
         case "download": return download(S.panes[S.active].conn, selected(S.active));
@@ -1632,7 +1702,7 @@ function bindFrame() {
     if (internal && dragFrom === pi && !e.target.closest('.row[data-kind="dir"]')) return;
     if (!internal && !types.includes("Files")) return;
     e.preventDefault();
-    e.dataTransfer.dropEffect = internal && e.shiftKey ? "move" : "copy";
+    e.dataTransfer.dropEffect = "copy";
     $$(".drop-target").forEach((x) => x.classList.remove("drop-target"));
     paneEl(pi).classList.add("drop-target");
   });
@@ -1656,7 +1726,7 @@ function bindFrame() {
         } catch (err) { toast(err.message, { err: true }); }
         return;
       }
-      return transfer(e.shiftKey ? "move" : "copy", d.pane, dstDir, d.paths);
+      return transfer("ask", d.pane, dstDir, d.paths);
     }
     const files = await filesFromDrop(e.dataTransfer);
     if (files.length) uploadFiles(pi, files, dstDir);

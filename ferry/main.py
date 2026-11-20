@@ -18,16 +18,14 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import archive, config, db, media, zipper
+from . import archive, config, db, media, trash, zipper
 from .backends import make_backend, manager
 from .backends.base import (AlreadyExists, BackendError, NotFound, PermissionDenied,
                             is_hidden, join, norm)
 from .transfers import Job, engine, unique_name
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 
-DEFAULT_TRASH = {"local": "@synology", "sftp": "/delete_me", "smb": "/delete_me",
-                 "ftp": "/delete_me", "dropbox": ""}
 
 
 # lifecycle ---------------------------------------------------------------------
@@ -165,7 +163,7 @@ class ConnBody(BaseModel):
 def _public_conn(c: dict) -> dict:
     c = dict(c)
     c["config"] = dict(c["config"])
-    c["config"].setdefault("trash", DEFAULT_TRASH.get(c["type"], ""))
+    c["config"].setdefault("trash", trash.DEFAULT_TRASH.get(c["type"], ""))
     c["live"] = c["id"] in manager.live
     return c
 
@@ -180,7 +178,7 @@ async def create_conn(body: ConnBody):
     if body.type not in db.TYPES:
         raise HTTPException(400, "Unknown type")
     cfg = dict(body.config)
-    cfg.setdefault("trash", DEFAULT_TRASH.get(body.type, ""))
+    cfg.setdefault("trash", trash.DEFAULT_TRASH.get(body.type, ""))
     return _public_conn(db.create_connection(body.name.strip() or body.type.upper(), body.type, cfg))
 
 
@@ -387,27 +385,12 @@ async def rename(body: RenameBody):
     return {"ok": True, "path": dst}
 
 
-def _trash_dir(trash: str, path: str) -> Optional[str]:
-    """Where a deleted item goes. None means delete for good."""
-    if not trash:
-        return None
-    if trash == "@synology":
-        parts = path.strip("/").split("/")
-        if len(parts) < 2:
-            raise PermissionDenied("Ferry won't delete a whole shared folder")
-        return None if parts[1] in ("#recycle", "delete_me") else "@synology"
-    t = norm(trash)
-    if path == t or path.startswith(t.rstrip("/") + "/"):
-        return None  # already in the trash: emptying it
-    return t
-
-
 @app.post("/api/delete", dependencies=[Depends(auth)])
 async def delete(body: DeleteBody):
     conn = db.get_connection(body.conn)
     if not conn:
         raise HTTPException(404, "No such connection")
-    trash = conn["config"].get("trash", DEFAULT_TRASH.get(conn["type"], ""))
+    trash_setting = trash.setting(conn)
     results = []
     b = await manager.get(body.conn)
     for p in body.paths:
@@ -416,33 +399,12 @@ async def delete(body: DeleteBody):
             results.append({"path": p, "error": "Can't delete the root"})
             continue
         try:
-            dest = None if body.permanent else _trash_dir(trash, p)
-            if dest is None:
+            if body.permanent:
                 await b.rmtree(p)
-                results.append({"path": p, "deleted": True})
-                continue
-            if dest == "@synology":
-                parts = p.strip("/").split("/")
-                share = "/" + parts[0]
-                sub = "/".join(parts[1:-1])
-                recycle = join(share, "#recycle")
-                if not await b.exists(recycle):
-                    recycle = join(share, "delete_me")
-                dest = join(recycle, sub) if sub else recycle
-                try:
-                    await b.makedirs(dest)
-                except Exception as e:
-                    if not isinstance(b.translate(e), PermissionDenied) or recycle.endswith("delete_me"):
-                        raise
-                    # no write access to #recycle: fall back to a delete_me folder in the share
-                    recycle = join(share, "delete_me")
-                    dest = join(recycle, sub) if sub else recycle
-            await b.makedirs(dest)
-            target = join(dest, posixpath.basename(p))
-            if await b.exists(target):
-                target = await unique_name(b, dest, posixpath.basename(p))
-            await b.rename(p, target)
-            results.append({"path": p, "trashed": target})
+                target = None
+            else:
+                target = await trash.discard(b, trash_setting, p)
+            results.append({"path": p, "deleted": True} if target is None else {"path": p, "trashed": target})
         except HTTPException:
             raise
         except Exception as e:  # noqa: BLE001
@@ -484,6 +446,42 @@ async def transfer(body: TransferBody):
     job = Job(kind=body.kind, src_conn=body.src_conn, src_paths=[norm(p) for p in body.paths],
               dst_conn=body.dst_conn, dst_dir=norm(body.dst_dir), conflict=body.conflict,
               title=_title(body.kind, body.paths, body.src_conn, body.dst_conn))
+    engine.submit(job)
+    return job.to_dict()
+
+
+class MergeBody(BaseModel):
+    conn: str
+    paths: list[str]
+    into: str
+
+
+@app.post("/api/merge", dependencies=[Depends(auth)])
+async def merge(body: MergeBody):
+    """Merge folders on one connection: everything moves into one of them."""
+    if not db.get_connection(body.conn, secrets_too=False):
+        raise HTTPException(404, "No such connection")
+    into = norm(body.into)
+    srcs = list(dict.fromkeys(norm(p) for p in body.paths if norm(p) != into))
+    if not srcs:
+        raise HTTPException(400, "Pick at least two folders")
+    for sp in srcs:
+        if into.startswith(sp.rstrip("/") + "/") or sp.startswith(into.rstrip("/") + "/"):
+            raise HTTPException(400, "Can't merge a folder with one inside it")
+
+    async def check(b):
+        for p in [into, *srcs]:
+            if not (await b.stat(p)).is_dir:
+                raise BackendError(f"{posixpath.basename(p)} isn't a folder")
+    try:
+        await manager.run(body.conn, check)
+    except BackendError as e:
+        raise HTTPException(400, str(e))
+    names = [posixpath.basename(p) for p in srcs]
+    what = names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
+    job = Job(kind="move", src_conn=body.conn, src_paths=srcs, dst_conn=body.conn, dst_dir=into,
+              conflict="merge", targets={p: into for p in srcs},
+              title=f"Merge {what} into {posixpath.basename(into)}")
     engine.submit(job)
     return job.to_dict()
 

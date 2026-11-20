@@ -489,3 +489,12 @@ svg.i { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-widt
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition: none !important; }
 }
+
+/* merge and copy or move sheets */
+.radio { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border: 1px solid var(--contour); border-radius: var(--radius-s); cursor: pointer; }
+.radio:has(input:checked) { border-color: var(--magenta); background: var(--magenta-soft); }
+.radio input { accent-color: var(--magenta); margin: 0; width: auto; height: auto; flex: none; padding: 0; }
+.radio span { flex: 1; }
+.field .radio + .radio { margin-top: 6px; }
+.merge-notes { margin: 4px 0 0; padding-left: 18px; line-height: 1.55; }
+kbd { font: 500 11px/1 var(--font-c); border: 1px solid currentColor; border-radius: 4px; padding: 2px 5px; margin-left: 6px; opacity: .65; }
