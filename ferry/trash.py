@@ -7,7 +7,7 @@ from typing import Optional
 from .backends.base import Backend, PermissionDenied, join, norm
 
 DEFAULT_TRASH = {"local": "@synology", "sftp": "/delete_me", "smb": "/delete_me",
-                 "ftp": "/delete_me", "dropbox": ""}
+                 "ftp": "/delete_me", "webdav": "/delete_me", "s3": "/delete_me", "dropbox": ""}
 
 
 def setting(conn: dict) -> str:

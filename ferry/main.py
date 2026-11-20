@@ -5,9 +5,12 @@ import asyncio
 import json
 import os
 import posixpath
+import re
 import shutil
 import time
+import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
 
@@ -24,7 +27,7 @@ from .backends.base import (AlreadyExists, BackendError, NotFound, PermissionDen
                             is_hidden, join, norm)
 from .transfers import Job, engine, unique_name
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 
 
 
@@ -45,6 +48,12 @@ async def _housekeeping():
             await asyncio.to_thread(archive.cleanup_cache)
         except Exception:
             pass
+        for f in config.UPLOADS.iterdir():  # uploads nobody came back to finish
+            try:
+                if time.time() - f.stat().st_mtime > 7 * 86400:
+                    f.unlink()
+            except OSError:
+                pass
 
 
 @asynccontextmanager
@@ -55,7 +64,8 @@ async def lifespan(app: FastAPI):
     shutil.rmtree(config.TMP, ignore_errors=True)
     config.TMP.mkdir(parents=True, exist_ok=True)
     config.ssh_private_key_path()
-    tasks = [asyncio.create_task(manager.reap_idle()), asyncio.create_task(_housekeeping())]
+    tasks = [asyncio.create_task(manager.reap_idle()), asyncio.create_task(_housekeeping()),
+             asyncio.create_task(_sync_clock())]
     yield
     for t in tasks:
         t.cancel()
@@ -486,6 +496,132 @@ async def merge(body: MergeBody):
     return job.to_dict()
 
 
+# scheduled syncs -----------------------------------------------------------------------------
+# One way: new and changed files are copied from the source folder to the destination.
+# Nothing is ever deleted on either side.
+def _syncs() -> list[dict]:
+    return json.loads(db.get_setting("syncs") or "[]")
+
+
+def _save_syncs(items: list[dict]) -> None:
+    db.set_setting("syncs", json.dumps(items))
+
+
+def _sync_busy(s: dict) -> bool:
+    j = engine.jobs.get(s.get("last_job") or "")
+    return bool(j and j.status not in ("done", "error", "canceled"))
+
+
+def _run_sync(s: dict) -> Job:
+    src, dst = norm(s["src_dir"]), norm(s["dst_dir"])
+    job = Job(kind="copy", src_conn=s["src_conn"], src_paths=[src], dst_conn=s["dst_conn"], dst_dir=dst,
+              conflict="overwrite", targets={src: dst}, title=f"Sync {s['name']}")
+    engine.submit(job)
+    s["last_run"], s["last_job"] = time.time(), job.id
+    return job
+
+
+async def _sync_clock():
+    while True:
+        await asyncio.sleep(60)
+        try:
+            items, changed = _syncs(), False
+            for s in items:
+                if s.get("hours") and not _sync_busy(s) and time.time() - s.get("last_run", 0) >= s["hours"] * 3600:
+                    _run_sync(s)
+                    changed = True
+            if changed:
+                _save_syncs(items)
+        except Exception:
+            pass
+
+
+class SyncBody(BaseModel):
+    src_conn: str
+    src_dir: str
+    dst_conn: str
+    dst_dir: str
+    hours: float = 24  # 0 = only when asked
+
+
+def _sync_view(s: dict) -> dict:
+    j = engine.jobs.get(s.get("last_job") or "")
+    return {**s, "status": j.status if j else "", "error": (j.error if j else "") or ""}
+
+
+@app.get("/api/syncs", dependencies=[Depends(auth)])
+async def syncs_list():
+    return {"syncs": [_sync_view(s) for s in _syncs()]}
+
+
+@app.post("/api/syncs", dependencies=[Depends(auth)])
+async def syncs_add(body: SyncBody):
+    a, b_ = db.get_connection(body.src_conn, secrets_too=False), db.get_connection(body.dst_conn, secrets_too=False)
+    if not a or not b_:
+        raise HTTPException(404, "No such connection")
+    src, dst = norm(body.src_dir), norm(body.dst_dir)
+    if body.src_conn == body.dst_conn and (src == dst or dst.startswith(src.rstrip("/") + "/") or src.startswith(dst.rstrip("/") + "/")):
+        raise HTTPException(400, "The two folders can't be the same or inside each other")
+    if body.hours < 0 or (0 < body.hours < 1):
+        raise HTTPException(400, "Once an hour is the fastest")
+    s = {"id": uuid.uuid4().hex[:12], "src_conn": body.src_conn, "src_dir": src, "dst_conn": body.dst_conn,
+         "dst_dir": dst, "hours": body.hours, "last_run": 0, "last_job": "",
+         "name": f"{a['name']} {src} to {b_['name']} {dst}"}
+    _save_syncs([*_syncs(), s])
+    return _sync_view(s)
+
+
+@app.post("/api/syncs/{sid}/run", dependencies=[Depends(auth)])
+async def syncs_run(sid: str):
+    items = _syncs()
+    s = next((x for x in items if x["id"] == sid), None)
+    if not s:
+        raise HTTPException(404, "No such sync")
+    if _sync_busy(s):
+        raise HTTPException(409, "It's already running")
+    _run_sync(s)
+    _save_syncs(items)
+    return _sync_view(s)
+
+
+@app.delete("/api/syncs/{sid}", dependencies=[Depends(auth)])
+async def syncs_delete(sid: str):
+    _save_syncs([x for x in _syncs() if x["id"] != sid])
+    return {"ok": True}
+
+
+# search --------------------------------------------------------------------------------------
+@app.get("/api/search", dependencies=[Depends(auth)])
+async def search(conn: str, path: str, q: str, hidden: bool = False):
+    """File and folder names containing q, anywhere under path. Stops at 300 hits or 20 seconds."""
+    words = [w for w in q.lower().split() if w]
+    if not words:
+        raise HTTPException(400, "Type something to search for")
+    b = await manager.get(conn)
+    hits, todo, seen, deadline = [], [norm(path)], 0, time.time() + 20
+    partial = False
+    while todo:
+        if len(hits) >= 300 or time.time() > deadline:
+            partial = True
+            break
+        batch, todo = todo[:8], todo[8:]
+        results = await asyncio.gather(*(b.list(d) for d in batch), return_exceptions=True)
+        for res in results:
+            if isinstance(res, Exception):
+                continue  # a folder we may not read: skip it
+            for e in res:
+                if (e.hidden or is_hidden(e.name)) and not hidden:
+                    continue
+                seen += 1
+                if all(w in e.name.lower() for w in words) and not e.name.endswith(".ferry-part"):
+                    hits.append(e)
+                if e.is_dir:
+                    todo.append(e.path)
+    for e in hits:  # no Live Photo pairing here: results come from many folders
+        e.extra["kind"] = media.kind(e.name, e.is_dir)
+    return {"entries": [e.to_dict() for e in hits], "partial": partial, "seen": seen}
+
+
 @app.get("/api/jobs", dependencies=[Depends(auth)])
 async def jobs():
     return {"jobs": engine.snapshot(), "version": engine.version}
@@ -652,6 +788,80 @@ async def upload(request: Request, conn: str, path: str, mtime: float = 0, confl
     finally:
         b.busy -= 1
     return {"ok": True, "path": path, "size": total}
+
+
+# Big uploads arrive in pieces and wait in /data/uploads, so a phone that loses its
+# connection carries on from the last piece instead of starting over.
+def _staged(uid: str) -> Path:
+    if not re.fullmatch(r"[0-9a-f]{16,64}", uid):
+        raise HTTPException(400, "Bad upload id")
+    return config.UPLOADS / uid
+
+
+@app.get("/api/upload/chunk", dependencies=[Depends(auth)])
+async def upload_have(id: str):
+    f = _staged(id)
+    return {"have": f.stat().st_size if f.exists() else 0}
+
+
+@app.put("/api/upload/chunk", dependencies=[Depends(auth)])
+async def upload_chunk(request: Request, id: str, offset: int):
+    f = _staged(id)
+    have = f.stat().st_size if f.exists() else 0
+    if offset != have:
+        return JSONResponse({"error": "Out of step", "have": have}, status_code=409)
+
+    def append(data: bytes):
+        with open(f, "ab") as fh:
+            fh.write(data)
+    try:
+        async for chunk in request.stream():
+            await asyncio.to_thread(append, chunk)
+    except Exception:
+        pass  # connection dropped mid piece: what arrived stays, the client asks where to go on
+    return {"have": f.stat().st_size if f.exists() else 0}
+
+
+class UploadFinish(BaseModel):
+    id: str
+    conn: str
+    path: str
+    size: int
+    mtime: float = 0
+    conflict: str = "rename"
+
+
+@app.post("/api/upload/finish", dependencies=[Depends(auth)])
+async def upload_finish(body: UploadFinish):
+    f = _staged(body.id)
+    have = f.stat().st_size if f.exists() else 0
+    if have != body.size:
+        return JSONResponse({"error": "Upload isn't complete", "have": have}, status_code=409)
+    path = norm(body.path)
+    parent, name = posixpath.split(path)
+    _check_name(name)
+    b = await manager.get(body.conn)
+    await b.makedirs(parent)
+    if await b.exists(path):
+        if body.conflict == "skip":
+            f.unlink(missing_ok=True)
+            return {"skipped": True, "path": path}
+        if body.conflict == "rename":
+            path = await unique_name(b, parent, name)
+    w = await b.open_write(path, mtime=(body.mtime / 1000.0) if body.mtime else None)
+    b.busy = getattr(b, "busy", 0) + 1
+    try:
+        with open(f, "rb") as fh:
+            while data := await asyncio.to_thread(fh.read, 1 << 20):
+                await w.write(data)
+        await w.close()
+    except BaseException:
+        await w.abort()
+        raise
+    finally:
+        b.busy -= 1
+    f.unlink(missing_ok=True)
+    return {"ok": True, "path": path, "size": have}
 
 
 @app.get("/api/zip", dependencies=[Depends(auth)])

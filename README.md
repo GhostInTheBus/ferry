@@ -1,6 +1,6 @@
 # Ferry
 
-A small self-hosted web app for moving files between your machines. It runs in Docker on a NAS. You open it in a browser on your computer or phone and get two panes side by side, each pointed at a connection: the NAS itself, a Mac or Linux box over SFTP, a Windows share over SMB, an FTP server, or Dropbox. Pick files on one side, copy or move them to the other.
+A small self-hosted web app for moving files between your machines. It runs in Docker on a NAS. You open it in a browser on your computer or phone and get two panes side by side, each pointed at a connection: the NAS itself, a Mac or Linux box over SFTP, a Windows share over SMB, an FTP server, WebDAV (Nextcloud and friends), S3 storage, or Dropbox. Pick files on one side, copy or move them to the other.
 
 Built for reaching home over Tailscale, including from a phone.
 
@@ -11,6 +11,10 @@ The video is a screen recording of a demo copy. Photos by @lovepubliclands.
 ## What it does
 
 - Browse, rename, make folders, upload from the device you're on, download files or whole folders as a zip
+- Uploads from a phone go up in pieces, so a dropped connection carries on from the last piece instead of starting over
+- Search file names in a folder and everything under it: type in the filter box and press Enter
+- Rename many at once: select them, Rename, swap one piece of text for another
+- Scheduled syncs: copy new and changed files from one folder to another every hour, day or week. One way, and it never deletes
 - Copy and move between any two connections, with a queue you can pause, resume, cancel and retry
 - Dragging between the two panes asks whether to copy or move (C or M on the keyboard)
 - Merge folders: pick two or more folders on one machine and the one to keep. Everything moves into it, a file that's already there with the same content goes to the trash, and a different file with the same name is kept with a number added
@@ -69,6 +73,14 @@ Nothing is gone for good unless you delete it from inside the trash. Each connec
 
 Make an app once at dropbox.com/developers/apps: Scoped access, Full Dropbox, with the files.metadata.read, files.content.read and files.content.write permissions. Paste its App key into Ferry, sign in, and paste back the code Dropbox shows you. No app secret is stored.
 
+## WebDAV and S3
+
+WebDAV takes the server's address, a user and a password. For Nextcloud that's the address under Files settings, WebDAV, with an app password.
+
+S3 takes a bucket, an access key and a secret key. Leave the endpoint blank for Amazon, or paste the S3 address Backblaze B2, Wasabi, MinIO or Cloudflare R2 give you.
+
+Neither keeps a file's original date: files get the time they were uploaded. Ferry compares by size there, so a rerun still skips what's already across.
+
 ## NFS
 
 Mount the NFS export on the NAS (Synology: File Station, Tools, Mount Remote Folder) and it shows up under the NAS connection like any other folder.
@@ -94,6 +106,10 @@ python3 tests/servers.py /tmp/ferrytest &
 python3 tests/e2e.py /tmp/ferrytest
 python3 tests/e2e_v02.py /tmp/ferrytest
 python3 tests/e2e_merge.py /tmp/ferrytest
+
+# WebDAV, S3, search, syncs and uploads (needs wsgidav, cheroot and moto[server])
+python3 tests/cloud_servers.py /tmp/ferrytest &
+python3 tests/e2e_cloud.py /tmp/ferrytest
 ```
 
 ## Known gaps

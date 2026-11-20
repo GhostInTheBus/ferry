@@ -1,6 +1,6 @@
 """Common storage backend interface.
 
-Every connection type (local disk, SFTP, SMB, FTP, Dropbox) implements the
+Every connection type (local disk, SFTP, SMB, FTP, WebDAV, S3, Dropbox) implements the
 same small async API. Paths given to a backend are always POSIX style and
 relative to the connection root, e.g. "/Photos/2026". The root is "/".
 """
@@ -161,6 +161,8 @@ class Backend:
     seekable = True
     # True when a part file can be reopened and continued at an offset
     resumable = False
+    # False when files get the upload time as their date, so dates can't tell copies apart
+    keeps_dates = True
 
     def __init__(self, conn: dict, on_config_update: Optional[Callable[[dict], None]] = None):
         self.conn = conn

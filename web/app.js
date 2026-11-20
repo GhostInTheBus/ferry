@@ -288,7 +288,7 @@ function renderDockSwitch() {
   S.panes.forEach((p) => paneEl(p.i).classList.toggle("off", MOBILE.matches && S.active !== p.i));
 }
 
-function typeIcon(t) { return { local: "server", sftp: "laptop", smb: "server", ftp: "server", dropbox: "cloud" }[t] || "server"; }
+function typeIcon(t) { return { local: "server", sftp: "laptop", smb: "server", ftp: "server", webdav: "cloud", s3: "cloud", dropbox: "cloud" }[t] || "server"; }
 
 function renderPane(i) {
   const p = S.panes[i];
@@ -346,17 +346,51 @@ function renderTools(i) {
     <button class="icon-btn small" data-act="mkdir" data-pane="${i}" title="New folder">${icon("newfolder")}</button>
     <button class="icon-btn small" data-act="upload" data-pane="${i}" title="Upload from this device">${icon("upload")}</button>
     <span class="grow"></span>
-    <label class="filter">${icon("search")}<input placeholder="Filter" value="${esc(p.filter)}" data-pane="${i}" aria-label="Filter this folder"></label>
+    <label class="filter">${icon("search")}<input placeholder="${"Filter or search"}" enterkeyhint="search" value="${esc(p.filter)}" data-pane="${i}" title="Type to filter this folder. Press Enter to search its subfolders too." aria-label="Filter this folder, press Enter to search subfolders"></label>
     <button class="sort-btn" data-act="sort" data-pane="${i}" title="Change sort">${sortLabel} ${p.sort.dir > 0 ? "↑" : "↓"}</button>
     <button class="icon-btn small" data-act="view" data-pane="${i}" title="${p.view === "grid" ? "List view" : "Grid view"}">${icon(p.view === "grid" ? "list" : "grid")}</button>`;
   const f = $(".filter input", paneEl(i));
-  f.oninput = () => { p.filter = f.value; computeVisible(i); renderList(i); renderFoot(i); };
-  f.onkeydown = (e) => { if (e.key === "Escape") { f.value = ""; f.oninput(); f.blur(); } e.stopPropagation(); };
+  f.oninput = () => {
+    p.filter = f.value;
+    if (p.search && !f.value.trim()) return load(i);  // box cleared: back to the folder
+    computeVisible(i); renderList(i); renderFoot(i);
+  };
+  f.onkeydown = (e) => {
+    if (e.key === "Escape") { f.value = ""; f.oninput(); f.blur(); }
+    if (e.key === "Enter" && f.value.trim()) { e.preventDefault(); searchPane(i, f.value.trim()); }
+    e.stopPropagation();
+  };
+}
+
+// Search file names in this folder and everything under it. Results replace the list until
+// the box is cleared or you go somewhere else.
+async function searchPane(i, q) {
+  const p = S.panes[i];
+  if (!p.conn) return;
+  const seq = ++p.loadSeq;
+  p.loading = true;
+  $(".loading-bar", paneEl(i)).hidden = false;
+  try {
+    const r = await GET("/api/search", { conn: p.conn, path: p.path, q, hidden: S.prefs.showHidden ? 1 : undefined });
+    if (seq !== p.loadSeq) return;
+    p.search = { q, partial: r.partial };
+    p.entries = r.entries;
+    p.sel.clear(); p.cursor = -1; p.anchor = -1;
+  } catch (e) {
+    if (seq !== p.loadSeq) return;
+    toast(e.message, { err: true });
+  } finally {
+    if (seq === p.loadSeq) {
+      p.loading = false;
+      $(".loading-bar", paneEl(i)).hidden = true;
+      computeVisible(i); renderList(i); renderFoot(i); renderActionbar();
+    }
+  }
 }
 
 function computeVisible(i) {
   const p = S.panes[i];
-  const f = p.filter.trim().toLowerCase();
+  const f = p.search ? "" : p.filter.trim().toLowerCase();
   let v = p.entries.filter((e) => (S.prefs.showHidden || !e.hidden) && (!S.prefs.groupLive || !e.live_of) && (!f || e.name.toLowerCase().includes(f)));
   const { key, dir } = p.sort;
   const coll = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
@@ -388,7 +422,7 @@ function rowHtml(p, e, idx) {
   const size = e.is_dir ? "" : fmtSize(e.size);
   return `<div class="row${idx === p.cursor ? " cursor" : ""}${e.hidden ? " hidden-file" : ""}" role="option" draggable="true" data-i="${idx}" data-kind="${e.kind}" aria-selected="${sel}">
     <span class="ico" data-toggle>${ico}${live}<span class="check">${icon("check")}</span></span>
-    <span class="nm-wrap" style="min-width:0"><span class="nm" title="${esc(e.name)}">${esc(e.name)}${live}</span>
+    <span class="nm-wrap" style="min-width:0"><span class="nm" title="${esc(p.search ? e.path : e.name)}">${esc(e.name)}${live}${p.search ? `<span class="in">${esc(dirname(e.path) === p.path ? "here" : "in " + dirname(e.path).slice(p.path === "/" ? 1 : p.path.length + 1))}</span>` : ""}</span>
       <span class="meta"><span>${size}</span><span>${fmtDate(e.mtime)}</span></span></span>
     <span class="sz">${size}</span><span class="dt">${fmtDate(e.mtime)}</span></div>`;
 }
@@ -407,8 +441,8 @@ function renderList(i) {
   }
   if (!p.visible.length) {
     if (p.loading) { el.innerHTML = ""; return; }
-    const why = p.entries.length && p.filter ? "Nothing matches that filter." : p.entries.length ? "Only hidden files in here." : "This folder is empty.";
-    el.innerHTML = `<div class="empty"><strong>${why}</strong>${MOBILE.matches ? "" : "Drop files here to upload them."}</div>`;
+    const why = p.search ? `Nothing named “${p.search.q}” in this folder or its subfolders.` : p.entries.length && p.filter ? "Nothing matches that filter." : p.entries.length ? "Only hidden files in here." : "This folder is empty.";
+    el.innerHTML = `<div class="empty"><strong>${esc(why)}</strong>${p.search ? "Clear the box to go back." : p.filter && p.entries.length ? "Press Enter to search subfolders too." : MOBILE.matches ? "" : "Drop files here to upload them."}</div>`;
     return;
   }
   el.innerHTML = p.visible.map((e, idx) => rowHtml(p, e, idx)).join("");
@@ -422,6 +456,7 @@ function renderFoot(i) {
   const dirs = p.visible.length - files.length;
   const total = files.reduce((a, e) => a + e.size, 0);
   const parts = [];
+  if (p.search) parts.push(`Search: ${esc(p.search.q)}${p.search.partial ? " (first 300, there may be more)" : ""}`);
   if (dirs) parts.push(plural(dirs, "folder"));
   parts.push(plural(files.length, "file"));
   if (total) parts.push(fmtSize(total));
@@ -450,6 +485,7 @@ async function load(i, { keepSel = false } = {}) {
   try {
     const r = await GET("/api/list", { conn: p.conn, path: p.path });
     if (seq !== p.loadSeq) return;
+    if (p.search) { p.search = null; p.filter = ""; }
     p.entries = r.entries;
     p.path = r.path;
     p.error = null;
@@ -656,8 +692,50 @@ async function mkdirFlow(i) {
   } catch (e) { toast(e.message, { err: true }); }
 }
 
+// Rename several at once: swap one piece of text for another in every name.
+async function batchRename(i) {
+  const p = S.panes[i];
+  const items = selected(i);
+  const plan = (find, to) => items.map((e) => ({ e, name: find ? e.name.split(find).join(to) : e.name })).filter((x) => x.name !== x.e.name);
+  const el = sheet({
+    title: `Rename ${plural(items.length, "item")}`,
+    body: `<form id="bf"><label class="field"><span>Find in the names</span><input name="find" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="IMG_"></label>
+      <label class="field"><span>Replace with</span><input name="to" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="Leave blank to remove it"></label></form>
+      <div class="small muted" id="bprev"></div>`,
+    foot: `<button class="btn ghost" data-close2>Cancel</button><button class="btn primary" form="bf" disabled>Rename</button>`,
+  });
+  const form = $("#bf", el), go = $("button[form=bf]", el), prev = $("#bprev", el);
+  const draw = () => {
+    const todo = plan(form.find.value, form.to.value);
+    const bad = todo.find((x) => !x.name.trim() || /[\\/]/.test(x.name));
+    const names = new Set(items.map((e) => (todo.find((x) => x.e === e)?.name ?? e.name).toLowerCase()));
+    const clash = names.size < items.length;
+    go.disabled = !todo.length || !!bad || clash;
+    go.textContent = todo.length ? `Rename ${todo.length}` : "Rename";
+    prev.innerHTML = bad ? "That would leave a name empty or put a slash in it." : clash ? "Two of them would end up with the same name."
+      : !form.find.value ? "" : !todo.length ? "None of the names contain that."
+      : todo.slice(0, 4).map((x) => `${esc(x.e.name)} becomes <b>${esc(x.name)}</b>`).join("<br>") + (todo.length > 4 ? `<br>and ${todo.length - 4} more` : "");
+  };
+  form.oninput = draw;
+  setTimeout(() => form.find.focus(), 30);
+  $("[data-close2]", el).onclick = closeAll;
+  form.onsubmit = async (ev) => {
+    ev.preventDefault();
+    const todo = plan(form.find.value, form.to.value);
+    closeAll();
+    let done = 0, firstErr = "";
+    for (const x of todo) {
+      try { await POST("/api/rename", { conn: p.conn, path: x.e.path, name: x.name }); done++; }
+      catch (err) { firstErr = firstErr || err.message; }
+    }
+    toast(firstErr ? `Renamed ${done} of ${todo.length}: ${firstErr}` : `Renamed ${plural(done, "item")}`, firstErr ? { err: true } : {});
+    load(i);
+  };
+}
+
 async function renameFlow(i) {
   const p = S.panes[i];
+  if (selected(i).length > 1) return batchRename(i);
   const [e] = selected(i);
   if (!e) return;
   const name = await promptSheet({ title: "Rename", label: "New name", value: e.name, ok: "Rename", selectStem: !e.is_dir });
@@ -785,32 +863,118 @@ function pumpUploads() {
   const running = S.uploads.filter((u) => u.status === "running").length;
   const next = S.uploads.filter((u) => u.status === "queued").slice(0, Math.max(0, 2 - running));
   next.forEach(startUpload);
+  holdAwake(S.uploads.some((u) => u.status === "running" || u.status === "queued"));
   renderCrossing();
   if (S.sheet?.kind === "transfers") renderTransfers();
 }
 
+const UP_PIECE = 8 << 20;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// The same file to the same place always gets the same id, so picking it again after a
+// reload carries on where it stopped.
+function upId(u) {
+  const str = `${u.conn}|${u.path}|${u.size}|${u.file.lastModified || 0}`;
+  let out = "";
+  for (let seed = 1; seed <= 4; seed++) {
+    let h1 = 0xdeadbeef ^ seed, h2 = 0x41c6ce57 ^ seed;
+    for (let k = 0; k < str.length; k++) {
+      const ch = str.charCodeAt(k);
+      h1 = Math.imul(h1 ^ ch, 2654435761); h2 = Math.imul(h2 ^ ch, 1597334677);
+    }
+    h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+    out += (h1 >>> 0).toString(16).padStart(8, "0");
+  }
+  return out;
+}
+
+function upRedraw() { renderCrossing(); if (S.sheet?.kind === "transfers") renderTransfers(); }
+
+// One PUT. Resolves with the parsed answer, rejects with { retry } on a dropped connection.
+function upSend(u, url, blob, base) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    u.xhr = xhr;
+    xhr.open("PUT", url);
+    xhr.setRequestHeader("X-Ferry", "1");
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+    let last = 0;
+    xhr.upload.onprogress = (ev) => {
+      u.loaded = base + ev.loaded;
+      const now = performance.now();
+      if (now - last > 400) { last = now; upRedraw(); }
+    };
+    xhr.onload = () => {
+      let body = {};
+      try { body = JSON.parse(xhr.responseText); } catch {}
+      if ((xhr.status >= 200 && xhr.status < 300) || (xhr.status === 409 && body.have !== undefined)) return resolve(body);
+      if (xhr.status >= 502) return reject({ retry: true });
+      reject({ message: body.error || body.detail || xhr.statusText || `HTTP ${xhr.status}` });
+    };
+    xhr.onerror = xhr.ontimeout = () => reject({ retry: true });
+    xhr.onabort = () => reject({ canceled: true });
+    xhr.send(blob);
+  });
+}
+
+// Keep trying through drops: wait, ask Ferry how much it has, go on from there.
+async function upPatiently(u, fn) {
+  for (let fails = 0; ; ) {
+    if (u.status !== "running") throw { canceled: true };
+    try { const r = await fn(); u.note = ""; return r; }
+    catch (e) {
+      const retry = e.retry || e.status === 0 || e.status >= 502;
+      if (!retry || u.status !== "running" || ++fails > 60) throw e.retry ? { message: "Connection dropped" } : e;
+      u.note = "Waiting for the connection";
+      upRedraw();
+      await sleep(Math.min(30000, 1500 * fails));
+    }
+  }
+}
+
+async function runUpload(u) {
+  const meta = { conn: u.conn, path: u.path, mtime: u.file.lastModified || 0, conflict: S.prefs.conflict };
+  if (u.size <= UP_PIECE) {
+    await upPatiently(u, () => upSend(u, `/api/upload${qs(meta)}`, u.file, 0));
+    return;
+  }
+  const id = upId(u);
+  let have = (await upPatiently(u, () => GET("/api/upload/chunk", { id }))).have;
+  if (have > u.size) have = 0;
+  while (have < u.size) {
+    u.loaded = have;
+    const from = have;
+    have = (await upPatiently(u, async () => {
+      // after a drop Ferry may hold more or less than we think: ask before sending again
+      const at = u.note ? (await GET("/api/upload/chunk", { id })).have : from;
+      return upSend(u, `/api/upload/chunk${qs({ id, offset: at })}`, u.file.slice(at, at + UP_PIECE), at);
+    })).have;
+  }
+  u.loaded = u.size;
+  u.note = "Saving";
+  upRedraw();
+  await upPatiently(u, () => POST("/api/upload/finish", { id, size: u.size, ...meta }));
+}
+
 function startUpload(u) {
   u.status = "running";
-  const xhr = new XMLHttpRequest();
-  u.xhr = xhr;
-  xhr.open("PUT", `/api/upload${qs({ conn: u.conn, path: u.path, mtime: u.file.lastModified || 0, conflict: S.prefs.conflict })}`);
-  xhr.setRequestHeader("X-Ferry", "1");
-  xhr.setRequestHeader("Content-Type", "application/octet-stream");
-  let last = 0;
-  xhr.upload.onprogress = (ev) => {
-    u.loaded = ev.loaded;
-    const now = performance.now();
-    if (now - last > 400) { last = now; renderCrossing(); if (S.sheet?.kind === "transfers") renderTransfers(); }
-  };
-  xhr.onload = () => {
-    if (xhr.status >= 200 && xhr.status < 300) { u.status = "done"; u.loaded = u.size; }
-    else { u.status = "error"; try { u.error = JSON.parse(xhr.responseText).error || xhr.statusText; } catch { u.error = xhr.statusText || `HTTP ${xhr.status}`; } }
-    finishUpload(u);
-  };
-  xhr.onerror = () => { u.status = "error"; u.error = "Connection dropped"; finishUpload(u); };
-  xhr.onabort = () => { u.status = "canceled"; finishUpload(u); };
-  xhr.send(u.file);
+  runUpload(u).then(
+    () => { u.status = "done"; u.loaded = u.size; },
+    (e) => { if (e?.canceled || u.status === "canceled") u.status = "canceled"; else { u.status = "error"; u.error = e?.message || "Upload failed"; } },
+  ).finally(() => { u.note = ""; finishUpload(u); });
 }
+
+// Phones stop uploads when the screen locks. Hold it awake while files are going up.
+let wake = null;
+async function holdAwake(on) {
+  try {
+    if (on && !wake && navigator.wakeLock) { wake = await navigator.wakeLock.request("screen"); wake.onrelease = () => (wake = null); }
+    if (!on && wake) { await wake.release(); wake = null; }
+  } catch {}
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") holdAwake(S.uploads?.some((u) => u.status === "running" || u.status === "queued"));
+});
 
 function finishUpload(u) {
   delete u.xhr;
@@ -906,7 +1070,7 @@ function renderActionbar() {
       <button class="btn" data-act="move-across" ${o.conn ? "" : "disabled"} title="Move to ${esc(dest)}">${icon("move")}<span>Move<span class="lbl-long"> to ${esc(dest)}</span></span></button>
       ${MOBILE.matches ? "" : `
       <button class="btn ghost" data-act="download" title="Download to this device">${icon("download")}<span class="lbl-long">Download</span></button>
-      ${one ? `<button class="btn ghost" data-act="rename" title="Rename">${icon("pencil")}<span class="lbl-long">Rename</span></button>` : ""}
+      <button class="btn ghost" data-act="rename" title="${one ? "Rename" : "Rename them all at once"}">${icon("pencil")}<span class="lbl-long">Rename</span></button>
       ${one && one.kind === "archive" ? `<button class="btn ghost" data-act="extract" title="Open archive">${icon("extract")}<span class="lbl-long">Extract</span></button>` : ""}
       ${canMerge ? `<button class="btn ghost" data-act="merge" title="Merge these folders into one">${icon("merge")}<span class="lbl-long">Merge</span></button>` : ""}
       <button class="btn ghost danger" data-act="delete" title="Delete">${icon("trash")}</button>`}
@@ -1045,7 +1209,8 @@ function moreSheet(i) {
 // ---------------------------------------------------------------- transfers sheet
 function openTransfers() {
   sheet({ title: "Transfers", body: `<div id="tx"></div>`, wide: true, kind: "transfers",
-          foot: `<button class="btn ghost left" data-clear>Clear finished</button><button class="btn" data-close3>Done</button>` });
+          foot: `<button class="btn ghost left" data-clear>Clear finished</button><button class="btn ghost" data-syncs>${icon("refresh")}Scheduled syncs</button><button class="btn" data-close3>Done</button>` });
+  $("[data-syncs]").onclick = openSyncs;
   $("[data-clear]").onclick = async () => {
     S.uploads = S.uploads.filter((u) => u.status === "running" || u.status === "queued");
     await POST("/api/jobs/clear").catch(() => {});
@@ -1053,6 +1218,53 @@ function openTransfers() {
   };
   $("[data-close3]").onclick = closeAll;
   renderTransfers();
+}
+
+// A sync copies new and changed files one way on a schedule. It never deletes.
+async function openSyncs() {
+  const el = sheet({ title: "Scheduled syncs", wide: true, kind: "syncs", body: `<div id="sy"></div>`,
+                     foot: `<button class="btn" data-close3>Done</button>` });
+  $("[data-close3]", el).onclick = closeAll;
+  const HOURS = [[1, "Every hour"], [24, "Every day"], [168, "Every week"], [0, "Only when I ask"]];
+  const every = (h) => (HOURS.find((x) => x[0] === h) || [0, `Every ${h} hours`])[1];
+  let hours = 24;
+  const draw = async () => {
+    const box = $("#sy");
+    if (!box) return;
+    let list = [];
+    try { list = (await GET("/api/syncs")).syncs; } catch (e) { box.innerHTML = `<div class="note">${esc(e.message)}</div>`; return; }
+    const a = S.panes[S.active], b = S.panes[other(S.active)];
+    const can = a.conn && b.conn;
+    box.innerHTML = `${list.map((s) => `<div class="job"><div class="hd"><span class="ttl">${esc(s.name)}</span>
+        <button class="btn ghost" data-run="${s.id}" ${["running", "queued", "waiting"].includes(s.status) ? "disabled" : ""}>Run now</button>
+        <button class="icon-btn small" data-rm="${s.id}" title="Remove this sync. Files stay where they are.">${icon("trash")}</button></div>
+        <div class="sub"><span>${every(s.hours)}</span><span>${s.last_run ? `Last run ${fmtDate(s.last_run)}` : "Hasn't run yet"}</span>
+        ${s.status ? `<span class="st ${s.status}">${esc(jobStatusText({ status: s.status, phase: "Running" }))}</span>` : ""}${s.error ? `<span class="st error">${esc(s.error)}</span>` : ""}</div></div>`).join("")
+      || `<p class="muted">No syncs yet.</p>`}
+      <hr style="border:0;border-top:1px solid var(--contour);margin:18px 0">
+      <div class="field"><span>New sync from the folders open now</span>
+        ${can ? `<p class="small" style="margin:0 0 8px">From <b>${esc(connName(a.conn))} ${esc(a.path)}</b> to <b>${esc(connName(b.conn))} ${esc(b.path)}</b></p>
+        <div class="seg" id="syh">${HOURS.map(([h, l]) => `<button type="button" data-h="${h}" aria-pressed="${h === hours}">${l}</button>`).join("")}</div>`
+        : `<p class="small muted" style="margin:0">Open the folder to copy from in one dock and the folder to copy to in the other.</p>`}
+        <small>New and changed files are copied across. A changed file replaces the older copy. Nothing is ever deleted on either side.</small></div>
+      ${can ? `<button class="btn primary" data-add>Add this sync</button>` : ""}`;
+  };
+  $("#sy", el).onclick = async (e) => {
+    const t = e.target.closest("button");
+    if (!t) return;
+    try {
+      if (t.dataset.h !== undefined) { hours = Number(t.dataset.h); return draw(); }
+      if (t.dataset.run) await POST(`/api/syncs/${t.dataset.run}/run`);
+      if (t.dataset.rm) await api("DELETE", `/api/syncs/${t.dataset.rm}`);
+      if (t.dataset.add !== undefined) {
+        const a = S.panes[S.active], b = S.panes[other(S.active)];
+        await POST("/api/syncs", { src_conn: a.conn, src_dir: a.path, dst_conn: b.conn, dst_dir: b.path, hours });
+        toast("Sync added");
+      }
+    } catch (err) { toast(err.message, { err: true }); }
+    draw();
+  };
+  draw();
 }
 
 function jobStatusText(j) {
@@ -1071,7 +1283,7 @@ function renderTransfers() {
   }
   const upHtml = ups.map((u) => {
     const pct = u.size ? Math.floor((u.loaded / u.size) * 100) : u.status === "done" ? 100 : 0;
-    const st = { queued: "Waiting", running: "Uploading", done: "Uploaded", error: "Failed", canceled: "Canceled" }[u.status];
+    const st = (u.status === "running" && u.note) || { queued: "Waiting", running: "Uploading", done: "Uploaded", error: "Failed", canceled: "Canceled" }[u.status];
     return `<div class="job"><div class="hd"><span class="ttl">${esc(u.name)} <span class="muted small">to ${esc(connName(u.conn))}</span></span>
       ${u.status === "running" || u.status === "queued" ? `<button class="icon-btn small" data-up-cancel="${u.id}" title="Cancel">${icon("close")}</button>` : ""}</div>
       <div class="bar"><i style="width:${pct}%"></i></div>
@@ -1105,7 +1317,7 @@ function renderTransfers() {
     if (!b) return;
     if (b.dataset.upCancel) {
       const u = S.uploads.find((x) => x.id === +b.dataset.upCancel);
-      if (u?.xhr) u.xhr.abort(); else if (u) { u.status = "canceled"; renderTransfers(); renderCrossing(); }
+      if (u) { const was = u.status; u.status = "canceled"; if (was === "running" && u.xhr) u.xhr.abort(); renderTransfers(); renderCrossing(); }
       return;
     }
     if (b.dataset.job) {
@@ -1379,7 +1591,7 @@ async function openArchive(i, e, password = "") {
 }
 
 // ---------------------------------------------------------------- connections
-const TYPE_LABEL = { local: "This NAS", sftp: "Mac or Linux (SFTP)", smb: "Windows share (SMB)", ftp: "FTP", dropbox: "Dropbox" };
+const TYPE_LABEL = { local: "This NAS", sftp: "Mac or Linux (SFTP)", smb: "Windows share (SMB)", ftp: "FTP", webdav: "WebDAV", s3: "S3", dropbox: "Dropbox" };
 
 function connSummary(c) {
   const k = c.config;
@@ -1414,6 +1626,13 @@ const FIELDS = {
         ["username", "User", "text", ""], ["password", "Password", "password", ""], ["root", "Start folder", "text", "/"]],
   ftp: [["host", "Host", "text", "ftp.example.com"], ["port", "Port", "number", "21"], ["username", "User", "text", ""],
         ["password", "Password", "password", ""], ["root", "Start folder", "text", "/"]],
+  webdav: [["url", "Address", "text", "https://cloud.example.com/remote.php/dav/files/me", "Nextcloud, ownCloud, a Synology or any other WebDAV server"],
+           ["username", "User", "text", ""], ["password", "Password", "password", "", "For Nextcloud, make an app password under Security"],
+           ["root", "Start folder", "text", "/"]],
+  s3: [["bucket", "Bucket", "text", "my-bucket"],
+       ["endpoint", "Endpoint", "text", "Leave blank for Amazon", "For Backblaze B2, Wasabi, MinIO or R2, the S3 address they give you"],
+       ["region", "Region", "text", "us-east-1"], ["username", "Access key", "text", ""], ["password", "Secret key", "password", ""],
+       ["root", "Start folder", "text", "/"]],
   dropbox: [["app_key", "Dropbox app key", "text", "", "From dropbox.com/developers/apps, see the steps below"],
             ["root", "Start folder", "text", "/"]],
 };
@@ -1472,7 +1691,7 @@ async function editConnection(c) {
         <div id="dbx-code" hidden><label class="field"><span>Code from Dropbox</span><input name="dbx_code" autocomplete="off"><small>Approve Ferry in the tab that opened, then paste the code here.</small></label>
         <button type="button" class="btn primary" data-dbx-finish>Finish sign in</button></div>`;
     }
-    const trashDefault = { local: "@synology", sftp: "/delete_me", smb: "/delete_me", ftp: "/delete_me", dropbox: "" }[type];
+    const trashDefault = { local: "@synology", sftp: "/delete_me", smb: "/delete_me", ftp: "/delete_me", webdav: "/delete_me", s3: "/delete_me", dropbox: "" }[type];
     const trash = cfg.trash ?? trashDefault;
     html += `<label class="field"><span>Deleted files go to</span>
       <input name="trash" value="${esc(trash)}" placeholder="Leave blank to delete for good" spellcheck="false" autocapitalize="off">

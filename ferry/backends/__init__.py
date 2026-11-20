@@ -22,6 +22,10 @@ def make_backend(conn: dict, on_update=None) -> Backend:
         from .smb import SMBBackend as B
     elif t == "ftp":
         from .ftp import FTPBackend as B
+    elif t == "webdav":
+        from .webdav import WebDAVBackend as B
+    elif t == "s3":
+        from .s3 import S3Backend as B
     elif t == "dropbox":
         from .dropbox_ import DropboxBackend as B
     else:

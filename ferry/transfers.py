@@ -55,11 +55,11 @@ async def unique_name(b: Backend, parent: str, name: str, taken: Optional[dict] 
         n += 1
 
 
-def same_file(dst: Entry, size: int, mtime: float) -> bool:
-    """Same size and date, two seconds of slack for FAT and SMB clocks."""
+def same_file(dst: Entry, size: int, mtime: float, dated: bool = True) -> bool:
+    """Is the file at the destination already this one? Size, and the date where dates survive."""
     if dst.is_dir or dst.size != size:
         return False
-    return not dst.mtime or not mtime or abs(dst.mtime - mtime) <= 2
+    return not dated or not dst.mtime or not mtime or abs(dst.mtime - mtime) <= 2
 
 
 @dataclass
@@ -578,7 +578,7 @@ class Engine:
         if mine is None:
             pending = existing.extra.get("pending", False)
             if not pending:
-                dup = same_file(existing, it.size, it.mtime)
+                dup = same_file(existing, it.size, it.mtime, db_.keeps_dates)
                 if job.conflict == "merge" and not existing.is_dir and existing.size == it.size:
                     same = await self._same_content(sb, it.src, db_, existing.path or join(parent, name))
                     dup = dup if same is None else same  # bytes beat dates when they can be read

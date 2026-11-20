@@ -14,6 +14,7 @@ os.environ.setdefault("HOME", str(DATA))
 WEB = Path(os.environ.get("FERRY_WEB", Path(__file__).resolve().parent.parent / "web"))
 CACHE = DATA / "cache"
 TMP = DATA / "tmp"
+UPLOADS = DATA / "uploads"  # half sent uploads wait here, kept across restarts
 
 MAX_JOBS = int(os.environ.get("FERRY_MAX_JOBS", "2"))
 FILE_WORKERS = int(os.environ.get("FERRY_FILE_WORKERS", "6"))
@@ -26,7 +27,7 @@ SESSION_DAYS = int(os.environ.get("FERRY_SESSION_DAYS", "30"))
 
 
 def ensure_dirs() -> None:
-    for d in (DATA, CACHE, CACHE / "thumbs", CACHE / "archives", TMP, DATA / "ssh"):
+    for d in (DATA, CACHE, CACHE / "thumbs", CACHE / "archives", TMP, UPLOADS, DATA / "ssh"):
         d.mkdir(parents=True, exist_ok=True)
 
 

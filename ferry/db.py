@@ -22,7 +22,7 @@ from cryptography.fernet import Fernet
 from . import config
 
 SECRET_FIELDS = {"password", "refresh_token"}
-TYPES = {"local", "sftp", "smb", "ftp", "dropbox"}
+TYPES = ("local", "sftp", "smb", "ftp", "webdav", "s3", "dropbox")
 
 _lock = threading.Lock()
 _db: Optional[sqlite3.Connection] = None
