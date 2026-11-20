@@ -1055,7 +1055,7 @@ function renderActionbar() {
   const o = S.panes[other(i)];
   if (!items.length) {
     bar.className = "actionbar idle";
-    bar.innerHTML = `<span class="info">${MOBILE.matches ? "" : "Select files, then copy or move them across. Dragging between docks asks which."}</span>`;
+    bar.innerHTML = `<span class="info">${MOBILE.matches ? "" : "Drag across to copy or move. Drag onto a folder or the path bar to move within a dock."}</span>`;
     return;
   }
   bar.className = "actionbar";
@@ -1912,36 +1912,59 @@ function bindFrame() {
     e.dataTransfer.effectAllowed = "copyMove";
     dragFrom = pi;
   });
-  app.addEventListener("dragend", () => { dragFrom = null; $$(".drop-target").forEach((x) => x.classList.remove("drop-target")); });
+  // Where a drop lands: a folder row, a folder in the path bar, the Up button, or the open folder.
+  const dropSpot = (e, pi) => {
+    const p = S.panes[pi];
+    const row = e.target.closest('.row[data-kind="dir"]');
+    if (row) return { el: row, dir: p.visible[+row.dataset.i].path };
+    const crumb = e.target.closest('.crumbs [data-act="nav"]');
+    if (crumb) return { el: crumb, dir: crumb.dataset.path };
+    const up = e.target.closest('[data-act="up"]:not([disabled])');
+    if (up) return { el: up, dir: dirname(p.path) };
+    return { el: paneEl(pi), dir: p.path };
+  };
+  const clearDrop = () => $$(".drop-target, .drop-row").forEach((x) => x.classList.remove("drop-target", "drop-row"));
+  app.addEventListener("dragend", () => { dragFrom = null; clearDrop(); });
   app.addEventListener("dragover", (e) => {
     const pi = paneOf(e.target);
     if (pi === null) return;
     const types = [...e.dataTransfer.types];
     const internal = types.includes("application/x-ferry");
-    if (internal && dragFrom === pi && !e.target.closest('.row[data-kind="dir"]')) return;
     if (!internal && !types.includes("Files")) return;
+    const spot = dropSpot(e, pi);
+    if (internal && dragFrom !== null) {
+      const paths = selectionPaths(dragFrom);
+      const same = S.panes[dragFrom].conn === S.panes[pi].conn;
+      // not onto itself, not into its own subfolder, not into the folder it's already in
+      if (same && paths.some((x) => spot.dir === x || spot.dir.startsWith(x + "/"))) return clearDrop();
+      if (dragFrom === pi && paths.every((x) => dirname(x) === spot.dir)) return clearDrop();
+    }
     e.preventDefault();
-    e.dataTransfer.dropEffect = "copy";
-    $$(".drop-target").forEach((x) => x.classList.remove("drop-target"));
-    paneEl(pi).classList.add("drop-target");
+    e.dataTransfer.dropEffect = internal && dragFrom === pi ? "move" : "copy";
+    clearDrop();
+    spot.el.classList.add(spot.el === paneEl(pi) ? "drop-target" : "drop-row");
   });
-  app.addEventListener("dragleave", (e) => { if (!e.relatedTarget || !paneEl(paneOf(e.target) ?? 0)?.contains(e.relatedTarget)) $$(".drop-target").forEach((x) => x.classList.remove("drop-target")); });
+  app.addEventListener("dragleave", (e) => { if (!e.relatedTarget || !paneEl(paneOf(e.target) ?? 0)?.contains(e.relatedTarget)) clearDrop(); });
   app.addEventListener("drop", async (e) => {
     const pi = paneOf(e.target);
-    $$(".drop-target").forEach((x) => x.classList.remove("drop-target"));
+    clearDrop();
     if (pi === null) return;
     e.preventDefault();
     const p = S.panes[pi];
-    const dirRow = e.target.closest('.row[data-kind="dir"]');
-    const dstDir = dirRow ? p.visible[+dirRow.dataset.i].path : p.path;
+    const dstDir = dropSpot(e, pi).dir;
     const raw = e.dataTransfer.getData("application/x-ferry");
     if (raw) {
       const d = JSON.parse(raw);
       if (d.paths.includes(dstDir)) return;
       if (d.pane === pi) {
-        // dropping onto a folder in the same dock moves it there
+        // inside one dock a drop is a move: onto a folder, or up the path bar to a parent
+        if (d.paths.every((x) => dirname(x) === dstDir)) return;
+        const n = selected(pi).length || d.paths.length;
         try {
           await POST("/api/transfer", { kind: "move", src_conn: p.conn, paths: d.paths, dst_conn: p.conn, dst_dir: dstDir, conflict: S.prefs.conflict });
+          toast(`Moving ${plural(n, "item")} to ${dstDir === "/" ? connName(p.conn) : basename(dstDir)}`);
+          p.sel.clear();
+          updateRowSelection(pi);
         } catch (err) { toast(err.message, { err: true }); }
         return;
       }

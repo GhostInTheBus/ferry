@@ -27,7 +27,7 @@ from .backends.base import (AlreadyExists, BackendError, NotFound, PermissionDen
                             is_hidden, join, norm)
 from .transfers import Job, engine, unique_name
 
-VERSION = "0.6.0"
+VERSION = "0.6.1"
 
 
 

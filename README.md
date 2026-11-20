@@ -17,6 +17,7 @@ The video is a screen recording of a demo copy. Photos by @lovepubliclands.
 - Scheduled syncs: copy new and changed files from one folder to another every hour, day or week. One way, and it never deletes
 - Copy and move between any two connections, with a queue you can pause, resume, cancel and retry
 - Dragging between the two panes asks whether to copy or move (C or M on the keyboard)
+- Dragging inside one pane moves: drop onto a folder, a folder in the path bar, or the Up button
 - Merge folders: pick two or more folders on one machine and the one to keep. Everything moves into it, a file that's already there with the same content goes to the trash, and a different file with the same name is kept with a number added
 - Copies start right away while folders are still being counted
 - Rerunning a transfer only fills in what's missing: a file already there with the same size and date is skipped
